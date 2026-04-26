@@ -3,13 +3,22 @@ import { collection, getDocs, doc, getDoc } from 'firebase/firestore';
 import { db } from '../../services/firebase/config';
 import { useAuth } from '../../contexts/AuthContext';
 import { useNavigate } from 'react-router-dom';
-import { PlayCircle, Clock } from 'lucide-react';
+import { PlayCircle, Clock, BarChart2 } from 'lucide-react';
+import ReportModal from '../../components/ui/ReportModal';
+import { AnimatePresence } from 'framer-motion';
 
 const StudentDashboard = () => {
-  const { currentUser } = useAuth();
+  const { currentUser, faceEnrolled } = useAuth();
   const [tests, setTests] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [selectedReport, setSelectedReport] = useState(null);
   const navigate = useNavigate();
+
+  useEffect(() => {
+    if (currentUser && !faceEnrolled) {
+      navigate('/student/enroll-face');
+    }
+  }, [currentUser, faceEnrolled, navigate]);
 
   useEffect(() => {
     const fetchTests = async () => {
@@ -19,9 +28,14 @@ const StudentDashboard = () => {
         
         const withAttemptStatus = await Promise.all(testsList.map(async (t) => {
           const attemptDoc = await getDoc(doc(db, 'attempts', `${currentUser.uid}_${t.id}`));
+          let attemptData = null;
+          if (attemptDoc.exists()) {
+            attemptData = attemptDoc.data();
+          }
           return {
             ...t,
-            status: attemptDoc.exists() ? attemptDoc.data().status : 'pending' 
+            status: attemptData ? attemptData.status : 'pending',
+            result: attemptData
           };
         }));
         
@@ -54,7 +68,9 @@ const StudentDashboard = () => {
             
             <div className="mt-auto">
               {test.status === 'completed' ? (
-                <button disabled className="w-full py-2 bg-gray-100 text-gray-500 rounded-lg font-medium tracking-wide">Completed</button>
+                <button onClick={() => setSelectedReport(test)} className="w-full py-2 bg-indigo-100 text-indigo-700 hover:bg-indigo-200 rounded-lg font-bold tracking-wide flex items-center justify-center transition-colors">
+                  <BarChart2 className="w-5 h-5 mr-2" /> View Report
+                </button>
               ) : test.status === 'started' ? (
                 <button onClick={() => navigate(`/student/exam/${test.id}`)} className="w-full py-2 bg-yellow-500 hover:bg-yellow-600 text-white rounded-lg font-medium tracking-wide flex items-center justify-center">
                   <PlayCircle className="w-5 h-5 mr-2" /> Resume Test
@@ -73,6 +89,17 @@ const StudentDashboard = () => {
           </div>
         )}
       </div>
+
+      <AnimatePresence>
+        {selectedReport && selectedReport.result && (
+          <ReportModal 
+            result={selectedReport.result} 
+            testName={selectedReport.title}
+            studentName={currentUser?.displayName || currentUser?.email?.split('@')[0] || 'Student'}
+            onClose={() => setSelectedReport(null)} 
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 };

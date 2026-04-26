@@ -19,6 +19,11 @@ const TestManagement = () => {
     option4: '',
     correctAnswer: ''
   });
+  
+  // Typing Management State
+  const [activeTab, setActiveTab] = useState('mcq'); // 'mcq' | 'typing'
+  const [typingConfig, setTypingConfig] = useState({ paragraph: '', duration: 60 });
+  const [isSavingTyping, setIsSavingTyping] = useState(false);
 
   const fetchTests = async () => {
     try {
@@ -59,6 +64,11 @@ const TestManagement = () => {
 
   const handleManageQuestions = (test) => {
     setSelectedTest(test);
+    setTypingConfig({
+      paragraph: test.typingParagraph || '',
+      duration: test.typingDuration || 60
+    });
+    setActiveTab('mcq');
     fetchQuestions(test.id);
   };
 
@@ -123,6 +133,26 @@ const TestManagement = () => {
     }
   };
 
+  const handleSaveTypingConfig = async (e) => {
+    e.preventDefault();
+    setIsSavingTyping(true);
+    try {
+      const { updateDoc } = await import('firebase/firestore');
+      await updateDoc(doc(db, 'tests', selectedTest.id), {
+        typingParagraph: typingConfig.paragraph,
+        typingDuration: parseInt(typingConfig.duration)
+      });
+      alert('Typing section saved successfully!');
+      // Update local state to reflect the change
+      setTests(tests.map(t => t.id === selectedTest.id ? { ...t, typingParagraph: typingConfig.paragraph, typingDuration: parseInt(typingConfig.duration) } : t));
+    } catch (err) {
+      console.error(err);
+      alert('Error saving typing section.');
+    } finally {
+      setIsSavingTyping(false);
+    }
+  };
+
   if (selectedTest) {
     return (
       <div className="space-y-8">
@@ -136,8 +166,15 @@ const TestManagement = () => {
           </div>
         </div>
 
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-          <h3 className="text-lg font-bold mb-4 text-gray-800">Add New MCQ Question</h3>
+        <div className="flex space-x-4 mb-6">
+          <button onClick={() => setActiveTab('mcq')} className={`px-4 py-2 font-bold rounded-lg ${activeTab === 'mcq' ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 border border-gray-200'}`}>Section A: MCQ</button>
+          <button onClick={() => setActiveTab('typing')} className={`px-4 py-2 font-bold rounded-lg ${activeTab === 'typing' ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 border border-gray-200'}`}>Section B: Typing</button>
+        </div>
+
+        {activeTab === 'mcq' && (
+          <>
+            <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+              <h3 className="text-lg font-bold mb-4 text-gray-800">Add New MCQ Question</h3>
           <form onSubmit={handleAddQuestion} className="space-y-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Question</label>
@@ -219,10 +256,47 @@ const TestManagement = () => {
                 </div>
               ))}
               {questions.length === 0 && (
-                <div className="text-center py-8 text-gray-500">No questions added yet.</div>
-              )}
-           </div>
-        </div>
+                  <div className="text-center py-8 text-gray-500">No questions added yet.</div>
+                )}
+             </div>
+          </div>
+        </>
+        )}
+
+        {activeTab === 'typing' && (
+          <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+            <h3 className="text-lg font-bold mb-4 text-gray-800">Configure Typing Section</h3>
+            <form onSubmit={handleSaveTypingConfig} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Typing Paragraph</label>
+                <textarea 
+                  className="w-full border border-gray-300 p-3 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none min-h-[200px]"
+                  placeholder="Enter the paragraph students need to type..."
+                  value={typingConfig.paragraph}
+                  onChange={e => setTypingConfig({...typingConfig, paragraph: e.target.value})}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Duration (Seconds)</label>
+                <input 
+                  type="number" 
+                  className="w-full sm:w-64 border border-gray-300 p-3 rounded-lg focus:ring-2 focus:ring-blue-500 focus:outline-none" 
+                  placeholder="e.g., 60"
+                  value={typingConfig.duration} 
+                  onChange={e => setTypingConfig({...typingConfig, duration: e.target.value})} 
+                />
+              </div>
+              <button 
+                type="submit" 
+                disabled={isSavingTyping}
+                className={`mt-4 bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 flex items-center justify-center font-medium shadow-sm transition w-full md:w-auto ${isSavingTyping ? 'opacity-70 cursor-not-allowed' : ''}`}
+              >
+                {isSavingTyping ? <Loader2 className="w-5 h-5 mr-2 animate-spin" /> : <Plus className="w-5 h-5 mr-2" />} 
+                {isSavingTyping ? 'Saving Config...' : 'Save Typing Config'}
+              </button>
+            </form>
+          </div>
+        )}
       </div>
     );
   }

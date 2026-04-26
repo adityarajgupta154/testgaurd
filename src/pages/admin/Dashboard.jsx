@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { collection, getDocs, query, where } from 'firebase/firestore';
+import { collection, getDocs, query, where, onSnapshot } from 'firebase/firestore';
 import { db } from '../../services/firebase/config';
 import { Users, FileText, CheckCircle, Search, Filter, AlertTriangle, Eye, X, BrainCircuit, Camera, ShieldCheck, ShieldX } from 'lucide-react';
 import { generateViolationSummary } from '../../services/ai/geminiAnalyzer';
@@ -18,14 +18,9 @@ const AdminDashboard = () => {
   const [showFaceRecords, setShowFaceRecords] = useState(false);
 
   useEffect(() => {
+    let unsubscribeUsers;
     const fetchData = async () => {
       try {
-        const uSnap = await getDocs(collection(db, 'users'));
-        const usersMap = {};
-        uSnap.docs.forEach(d => {
-           usersMap[d.id] = d.data();
-        });
-
         const tSnap = await getDocs(collection(db, 'tests'));
         const testsMap = {};
         const testsList = [];
@@ -38,49 +33,61 @@ const AdminDashboard = () => {
 
         const attSnap = await getDocs(query(collection(db, 'attempts'), where('status', '==', 'completed')));
         
-        const resultsArray = attSnap.docs.map(docSnap => {
-           const data = docSnap.data();
-           return {
-             id: docSnap.id,
-             studentEmail: usersMap[data.userId]?.email || 'Unknown Student',
-             testName: testsMap[data.testId]?.title || 'Unknown Test',
-             score: data.score || 0,
-             correctCount: data.correctCount || 0,
-             wrongCount: data.wrongCount || 0,
-             violationsCount: data.violations ? data.violations.length : 0,
-             violations: data.violations || [],
-             submittedAt: data.submittedAt || 0,
-             testId: data.testId,
-             answers: data.answers || []
-           };
-        });
+        unsubscribeUsers = onSnapshot(collection(db, 'users'), (uSnap) => {
+          const usersMap = {};
+          uSnap.docs.forEach(d => {
+             usersMap[d.id] = d.data();
+          });
 
-        setResults(resultsArray);
+          const resultsArray = attSnap.docs.map(docSnap => {
+             const data = docSnap.data();
+             return {
+               id: docSnap.id,
+               studentEmail: usersMap[data.userId]?.email || 'Unknown Student',
+               testName: testsMap[data.testId]?.title || 'Unknown Test',
+               score: data.score || 0,
+               correctCount: data.correctCount || 0,
+               wrongCount: data.wrongCount || 0,
+               violationsCount: typeof data.violations === 'number' ? data.violations : (data.violations ? data.violations.length : 0),
+               violations: data.logs || (Array.isArray(data.violations) ? data.violations : []),
+               submittedAt: data.submittedAt || 0,
+               testId: data.testId,
+               answers: data.answers || [],
+               typing: data.typing || null
+             };
+          });
 
-        // Build students list with face info
-        const studentsList = Object.entries(usersMap)
-          .filter(([, u]) => u.role === 'student')
-          .map(([uid, u]) => ({
-            uid,
-            email: u.email || 'N/A',
-            faceEnrolled: !!u.faceEnrolled,
-            faceImageUrl: u.faceImageUrl || null,
-            faceEnrolledAt: u.faceEnrolledAt || null
-          }));
-        setStudents(studentsList);
+          setResults(resultsArray);
 
-        setStats({
-          users: studentsList.length,
-          tests: tSnap.size,
-          completed: resultsArray.length
+          // Build students list with face info
+          const studentsList = Object.entries(usersMap)
+            .filter(([, u]) => u.role === 'student')
+            .map(([uid, u]) => ({
+              uid,
+              email: u.email || 'N/A',
+              faceEnrolled: !!u.faceEnrolled,
+              faceImageUrl: u.faceImage || u.faceImageUrl || null,  // Prefer Cloudinary, fallback to Firebase Storage
+              faceEnrolledAt: u.faceEnrolledAt || null
+            }));
+          setStudents(studentsList);
+
+          setStats({
+            users: studentsList.length,
+            tests: tSnap.size,
+            completed: resultsArray.length
+          });
+          setLoading(false);
         });
       } catch(e) {
         console.error("Error fetching admin data:", e);
-      } finally {
         setLoading(false);
       }
     };
     fetchData();
+    
+    return () => {
+      if (unsubscribeUsers) unsubscribeUsers();
+    };
   }, []);
 
   const filteredResults = results.filter(r => filteredTestId === 'all' || r.testId === filteredTestId);
@@ -88,6 +95,23 @@ const AdminDashboard = () => {
      if (sortBy === 'score') return b.score - a.score;
      return (b.submittedAt || 0) - (a.submittedAt || 0);
   });
+
+  const handleDeleteFace = async (student) => {
+    if (!window.confirm(`Are you sure you want to remove the face enrollment for ${student.email}? They will be forced to re-enroll.`)) return;
+    try {
+      const { doc, updateDoc } = await import('firebase/firestore');
+      await updateDoc(doc(db, 'users', student.uid), {
+        faceImage: null,
+        faceImageUrl: null,
+        faceEnrolled: false,
+        faceDeletedAt: Date.now()
+      });
+      // Removing local state update because onSnapshot handles it in real-time
+    } catch (err) {
+      console.error("Error removing face:", err);
+      alert("Failed to remove face enrollment.");
+    }
+  };
 
   return (
     <div className="space-y-8">
@@ -152,22 +176,30 @@ const AdminDashboard = () => {
                     {/* Face Image */}
                     <div className="w-full h-40 bg-gray-100 flex items-center justify-center overflow-hidden">
                       {s.faceImageUrl ? (
-                        <img src={s.faceImageUrl} alt={`Face of ${s.email}`} className="w-full h-full object-cover" />
+                        <img src={`${s.faceImageUrl}?t=${s.faceEnrolledAt || Date.now()}`} alt={`Face of ${s.email}`} className="w-full h-full object-cover" />
                       ) : (
                         <div className="text-gray-400 flex flex-col items-center">
                           <Camera className="w-10 h-10 mb-1" />
-                          <span className="text-xs">No Image</span>
+                          <span className="text-xs">No Face</span>
                         </div>
                       )}
                     </div>
                     {/* Info */}
                     <div className="p-3">
                       <p className="text-sm font-medium text-gray-900 truncate" title={s.email}>{s.email}</p>
-                      <div className="mt-2 flex items-center">
+                      <div className="mt-2 flex items-center justify-between">
                         {s.faceEnrolled ? (
-                          <span className="flex items-center text-xs font-semibold text-green-700 bg-green-50 px-2 py-1 rounded-full">
-                            <ShieldCheck className="w-3.5 h-3.5 mr-1" /> Enrolled
-                          </span>
+                          <>
+                            <span className="flex items-center text-xs font-semibold text-green-700 bg-green-50 px-2 py-1 rounded-full">
+                              <ShieldCheck className="w-3.5 h-3.5 mr-1" /> Enrolled
+                            </span>
+                            <button
+                              onClick={() => handleDeleteFace(s)}
+                              className="text-xs text-red-600 hover:text-red-800 font-medium hover:underline ml-2"
+                            >
+                              Remove Face
+                            </button>
+                          </>
                         ) : (
                           <span className="flex items-center text-xs font-semibold text-red-700 bg-red-50 px-2 py-1 rounded-full">
                             <ShieldX className="w-3.5 h-3.5 mr-1" /> Not Enrolled
@@ -307,7 +339,35 @@ const AdminDashboard = () => {
               )}
               
               <div className="p-6 overflow-y-auto space-y-4 flex-1">
-                 {selectedResult.answers && selectedResult.answers.length > 0 ? (
+                  {selectedResult.typing && (
+                    <div className="mb-6 p-5 border border-blue-200 bg-blue-50 rounded-xl">
+                      <h4 className="font-bold text-blue-900 text-lg mb-4">Typing Test Results</h4>
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+                        <div className="bg-white p-3 rounded-lg border border-blue-100 text-center">
+                          <p className="text-xs text-blue-500 font-bold uppercase tracking-wider">Net WPM</p>
+                          <p className="text-2xl font-black text-blue-700">{selectedResult.typing.wpm}</p>
+                        </div>
+                        <div className="bg-white p-3 rounded-lg border border-blue-100 text-center">
+                          <p className="text-xs text-blue-500 font-bold uppercase tracking-wider">Accuracy</p>
+                          <p className="text-2xl font-black text-blue-700">{selectedResult.typing.accuracy}%</p>
+                        </div>
+                        <div className="bg-white p-3 rounded-lg border border-blue-100 text-center">
+                          <p className="text-xs text-blue-500 font-bold uppercase tracking-wider">Errors</p>
+                          <p className="text-2xl font-black text-red-600">{selectedResult.typing.errors}</p>
+                        </div>
+                        <div className="bg-white p-3 rounded-lg border border-blue-100 text-center">
+                          <p className="text-xs text-blue-500 font-bold uppercase tracking-wider">Backspaces</p>
+                          <p className="text-2xl font-black text-blue-700">{selectedResult.typing.backspaceCount}</p>
+                        </div>
+                      </div>
+                      <div className="bg-white p-4 rounded-lg border border-blue-100">
+                        <p className="text-xs text-blue-500 font-bold uppercase tracking-wider mb-2">Typed Text</p>
+                        <p className="text-gray-800 font-mono text-sm whitespace-pre-wrap leading-relaxed">{selectedResult.typing.typedText || "No text typed."}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {selectedResult.answers && selectedResult.answers.length > 0 ? (
                    selectedResult.answers.map((ans, idx) => (
                      <div key={idx} className={`p-4 border rounded-xl ${ans.isCorrect ? 'border-green-200 bg-green-50' : 'border-red-200 bg-red-50'}`}>
                         <p className="font-medium text-gray-900 mb-2">Q{idx + 1}. {ans.questionText}</p>
@@ -326,7 +386,7 @@ const AdminDashboard = () => {
                      </div>
                    ))
                  ) : (
-                    <p className="text-gray-500 text-center py-4">No detailed answer data available for this attempt.</p>
+                    <p className="text-gray-500 text-center py-4">No detailed MCQ answer data available for this attempt.</p>
                  )}
               </div>
            </div>

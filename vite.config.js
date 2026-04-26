@@ -6,56 +6,82 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// This plugin serves face-api model files from their current root-level folders
-// at the /models/ URL path — exactly what face-api.js loadFromUri('/models') expects.
-// It maps e.g. GET /models/tiny_face_detector_model-shard1
-//           → file: ./tiny_face_detector/tiny_face_detector_model-shard1
-function faceApiModelsPlugin() {
-  // Map from model file prefix → folder name in project root
-  const MODEL_FOLDERS = {
-    'tiny_face_detector_model': 'tiny_face_detector',
-    'face_landmark_68_model': 'face_landmark_68',
-    'face_recognition_model': 'face_recognition',
-  };
-
-  return {
-    name: 'serve-face-api-models',
-    configureServer(server) {
-      server.middlewares.use((req, res, next) => {
-        if (!req.url.startsWith('/models/')) return next();
-
-        const fileName = req.url.replace('/models/', '').split('?')[0];
-
-        // Find which folder this file belongs to
-        let folderName = null;
-        for (const [prefix, folder] of Object.entries(MODEL_FOLDERS)) {
-          if (fileName.startsWith(prefix)) {
-            folderName = folder;
-            break;
-          }
-        }
-
-        if (!folderName) return next();
-
-        const filePath = path.join(process.cwd(), folderName, fileName);
-
-        if (fs.existsSync(filePath)) {
-          const ext = path.extname(fileName);
-          const contentType = ext === '.json' ? 'application/json' : 'application/octet-stream';
-          res.setHeader('Content-Type', contentType);
-          res.setHeader('Cache-Control', 'public, max-age=31536000');
-          fs.createReadStream(filePath).pipe(res);
-        } else {
-          console.warn(`[face-api-models] File not found: ${filePath}`);
-          next();
-        }
-      });
-    },
-  };
-}
+import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig({
-  plugins: [react(), faceApiModelsPlugin()],
+  plugins: [
+    react(),
+    VitePWA({
+      registerType: 'prompt', // Changed to prompt to allow manual refresh button UI
+      injectRegister: 'auto',
+      devOptions: {
+        enabled: false // Disabled in development as per requirements
+      },
+      workbox: {
+        cleanupOutdatedCaches: true,
+        globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+        runtimeCaching: [
+          {
+            urlPattern: /\.(?:png|jpg|jpeg|svg|gif|webp)$/i,
+            handler: 'StaleWhileRevalidate',
+            options: {
+              cacheName: 'images-cache',
+              expiration: {
+                maxEntries: 50,
+                maxAgeSeconds: 60 * 60 * 24 * 30 // 30 Days
+              }
+            }
+          },
+          {
+            urlPattern: /^https:\/\/firestore\.googleapis\.com\/.*/i,
+            handler: 'NetworkFirst',
+            options: {
+              cacheName: 'api-cache',
+              networkTimeoutSeconds: 5,
+              expiration: {
+                maxEntries: 50,
+                maxAgeSeconds: 60 * 60 * 24 // 1 Day
+              },
+              cacheableResponse: {
+                statuses: [0, 200]
+              }
+            }
+          },
+          {
+            urlPattern: /\.(?:js|css)$/i,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'static-resources',
+              expiration: {
+                maxEntries: 50,
+                maxAgeSeconds: 60 * 60 * 24 * 30 // 30 Days
+              }
+            }
+          }
+        ]
+      },
+      manifest: {
+        name: 'ExamGuard Platform',
+        short_name: 'ExamGuard',
+        description: 'AI Proctored Exam Platform',
+        theme_color: '#4f46e5',
+        background_color: '#ffffff',
+        display: 'standalone',
+        icons: [
+          {
+            src: 'https://cdn-icons-png.flaticon.com/512/3208/3208889.png',
+            sizes: '192x192',
+            type: 'image/png'
+          },
+          {
+            src: 'https://cdn-icons-png.flaticon.com/512/3208/3208889.png',
+            sizes: '512x512',
+            type: 'image/png'
+          }
+        ]
+      }
+    })
+  ],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

@@ -14,12 +14,16 @@ export const generateViolationSummary = async (violations) => {
 
   const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
   
-  const prompt = `You are an AI Proctoring Analyst. Review the following violation logs from an exam attempt and generate a single, succinct sentence summarizing the suspicious behavior. Do not exceed 100 characters.
+  const prompt = `You are an AI Proctoring Analyst. Review the following violation logs from an exam attempt. Provide two things:
+1. Cheating Probability (e.g. 80%)
+2. A single, succinct sentence summarizing the suspicious behavior.
 
 Violations:
 ${JSON.stringify(violations)}
 
-Summary format (example): "Student showed suspicious behavior (multiple faces detected 3 times)"`;
+Summary format exactly like this:
+Cheating Probability: [Percentage]
+Summary: [Sentence]`;
 
   try {
     const result = await model.generateContent(prompt);

@@ -13,6 +13,7 @@ import LiveMonitoring from '../pages/admin/LiveMonitoring';
 import StudentDashboard from '../pages/student/Dashboard';
 import TakeExam from '../pages/student/TakeExam';
 import FaceEnrollment from '../pages/student/FaceEnrollment';
+import TypingTest from '../pages/student/TypingTest';
 
 const AppRoutes = () => {
   return (
@@ -34,6 +35,7 @@ const AppRoutes = () => {
           <Route index element={<StudentDashboard />} />
           <Route path="enroll-face" element={<FaceEnrollment />} />
           <Route path="exam/:testId" element={<TakeExam />} />
+          <Route path="test/:testId/typing" element={<TypingTest />} />
         </Route>
       </Route>
 

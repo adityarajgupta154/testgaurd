@@ -19,23 +19,24 @@ const TakeExam = () => {
   const [loading, setLoading] = useState(true);
   const [timeLeft, setTimeLeft] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const isSubmittingRef = useRef(false);
   const [showThankYou, setShowThankYou] = useState(false);
   const [finalScore, setFinalScore] = useState(0);
   const submitExamRef = useRef(null);
   
   const desktopVideoRef = useRef(null);
   const mobileVideoRef = useRef(null);
+  const pauseVideoRef = useRef(null);
 
   // Mobile responsive state
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [cameraVisible, setCameraVisible] = useState(true);
 
   const handleAutoSubmit = useCallback(() => {
-    alert("Maximum violations reached. Auto-submitting exam.");
     if (submitExamRef.current) submitExamRef.current();
   }, []);
 
-  const { videoRef, startProctoring, stopProctoring, violations, stream, permissionDenied } = useProctoring(testId, currentUser?.uid, handleAutoSubmit);
+  const { videoRef, startProctoring, stopProctoring, violations, stream, permissionDenied, warningMessage, isPaused, setInternalNavigation } = useProctoring(testId, currentUser?.uid, handleAutoSubmit);
 
   // Sync stream to custom refs when they mount
   useEffect(() => {
@@ -43,8 +44,9 @@ const TakeExam = () => {
       if (videoRef.current) videoRef.current.srcObject = stream;
       if (desktopVideoRef.current) desktopVideoRef.current.srcObject = stream;
       if (mobileVideoRef.current) mobileVideoRef.current.srcObject = stream;
+      if (pauseVideoRef.current) pauseVideoRef.current.srcObject = stream;
     }
-  }, [stream, cameraVisible, sidebarOpen, videoRef]);
+  }, [stream, cameraVisible, sidebarOpen, isPaused]);
 
    useEffect(() => {
     const initializeExam = async () => {
@@ -79,6 +81,9 @@ const TakeExam = () => {
             alert('Already submitted!');
             return navigate('/student');
           }
+          if (attemptData.status === 'mcq_completed') {
+            return navigate(`/student/test/${testId}/typing`, { replace: true });
+          }
           setAnswers(attemptData.answers?.reduce((acc, a) => ({...acc, [a.questionId]: { value: a.studentAnswer }}), {}) || {});
           serverStartTime = attemptData.startTime; 
         } else {
@@ -99,11 +104,19 @@ const TakeExam = () => {
         setTimeLeft(Math.floor(remain / 1000));
 
         try {
-          if (!document.fullscreenElement) {
+          const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+          if (!document.fullscreenElement && !isMobile) {
             document.documentElement.requestFullscreen().catch(err => console.warn(err));
           }
         } catch(e){}
         startProctoring();
+
+        try {
+          const msg = new SpeechSynthesisUtterance("Your exam has started. Stay in frame");
+          window.speechSynthesis.speak(msg);
+        } catch (e) {
+          console.warn("Speech synthesis failed", e);
+        }
 
         setLoading(false);
       } catch (err) {
@@ -117,13 +130,14 @@ const TakeExam = () => {
 
   // Timer Countdown Effect
   useEffect(() => {
+    if (isPaused) return; // Freeze timer
     if (timeLeft === null || timeLeft <= 0) {
       if (timeLeft === 0 && !isSubmitting && testData && !showThankYou) submitExam();
       return;
     }
     const timerId = setInterval(() => setTimeLeft(prev => prev - 1), 1000);
     return () => clearInterval(timerId);
-  }, [timeLeft, isSubmitting, testData, showThankYou]);
+  }, [timeLeft, isSubmitting, testData, showThankYou, isPaused]);
 
   // Network Ping
   useEffect(() => {
@@ -161,8 +175,10 @@ const TakeExam = () => {
   };
 
   const submitExam = async () => {
-    if (isSubmitting || showThankYou) return;
+    if (isSubmittingRef.current || showThankYou) return;
+    isSubmittingRef.current = true;
     setIsSubmitting(true);
+    setInternalNavigation(true); // Prevent false violations during section switch/unmount
     stopProctoring();
     if(document.fullscreenElement) document.exitFullscreen().catch(()=>{});
 
@@ -190,6 +206,8 @@ const TakeExam = () => {
         };
       });
 
+      const hasTyping = !!testData.typingParagraph;
+
       await setDoc(doc(db, 'attempts', `${currentUser.uid}_${testId}`), {
         userId: currentUser.uid,
         testId: testId,
@@ -197,15 +215,22 @@ const TakeExam = () => {
         score: score,
         correctCount: correctCount,
         wrongCount: wrongCount,
-        status: 'completed',
-        submittedAt: Date.now()
+        status: hasTyping ? 'mcq_completed' : 'completed',
+        mcqSubmittedAt: Date.now(),
+        ...(hasTyping ? {} : { submittedAt: Date.now() })
       }, { merge: true });
 
       setFinalScore(score);
-      setShowThankYou(true);
+      
+      if (hasTyping) {
+        navigate(`/student/test/${testId}/typing`, { replace: true });
+      } else {
+        setShowThankYou(true);
+      }
     } catch(err) {
       console.error(err);
       alert('Fail to submit. Try again.');
+      isSubmittingRef.current = false;
       setIsSubmitting(false);
     }
   };
@@ -258,8 +283,64 @@ const TakeExam = () => {
       exit={{ opacity: 0 }}
       className="flex flex-col md:flex-row h-screen w-full fixed inset-0 z-50 bg-gray-50 font-sans"
     >
+      {/* Hidden dedicated video element for face detection logic to prevent null ref errors */}
+      <video ref={videoRef} autoPlay playsInline muted className="hidden" />
+
       {/* ===== MAIN CONTENT AREA ===== */}
       <div className="flex-1 flex flex-col h-full overflow-y-auto relative">
+
+        {/* Pause Overlay */}
+        <AnimatePresence>
+          {isPaused && (
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-[110] bg-black/80 backdrop-blur-md flex flex-col items-center justify-center text-white p-6"
+            >
+              <div className="w-20 h-20 mb-6 bg-red-600 rounded-full flex items-center justify-center animate-pulse shadow-[0_0_20px_rgba(220,38,38,0.5)]">
+                 <VideoOff className="w-10 h-10 text-white" />
+              </div>
+              <h2 className="text-3xl font-bold mb-4 text-center">Exam Paused</h2>
+              <p className="text-lg text-center text-gray-300 max-w-md mb-8">
+                We haven't detected your face in the camera frame for 60 seconds.
+              </p>
+              
+              {/* Camera Preview to help user align face */}
+              <div className="w-64 h-48 bg-gray-900 rounded-2xl overflow-hidden relative shadow-2xl border-2 border-white/20 mb-6">
+                 <video 
+                   ref={pauseVideoRef} 
+                   autoPlay 
+                   playsInline 
+                   muted 
+                   className="object-cover w-full h-full transform scale-x-[-1]" 
+                 />
+                 <div className="absolute top-2 right-2 flex items-center text-xs font-bold text-white bg-black/60 px-2 py-1 rounded-full backdrop-blur-md">
+                   Align Face
+                 </div>
+              </div>
+
+              <p className="text-xl font-semibold text-yellow-400 text-center animate-pulse">
+                Please put your face back into the frame to resume.
+              </p>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Warning Banner */}
+        <AnimatePresence>
+          {warningMessage && (
+            <motion.div
+              initial={{ opacity: 0, y: -20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="absolute top-16 left-1/2 transform -translate-x-1/2 z-[100] bg-red-600 text-white px-6 py-3 rounded-full shadow-2xl flex items-center gap-2 font-bold whitespace-nowrap"
+            >
+              <AlertCircle className="w-5 h-5" />
+              {warningMessage}
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* --- STICKY HEADER: Timer + Violations + Hamburger --- */}
         <motion.div 

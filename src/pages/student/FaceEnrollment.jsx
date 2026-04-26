@@ -2,9 +2,9 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
 import { loadModels, getFaceEmbedding } from '../../services/ai/faceApi';
-import { db, storage } from '../../services/firebase/config';
+import { uploadToCloudinary } from '../../services/cloudinary/upload';
+import { db } from '../../services/firebase/config';
 import { doc, updateDoc } from 'firebase/firestore';
-import { ref, uploadString, getDownloadURL } from 'firebase/storage';
 import { Camera, AlertCircle, CheckCircle, RefreshCw, ShieldCheck } from 'lucide-react';
 import { motion } from 'framer-motion';
 
@@ -18,6 +18,7 @@ const FaceEnrollment = () => {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
   const [modelsReady, setModelsReady] = useState(false);
+  const [cameraReady, setCameraReady] = useState(false);
   const [faceDetected, setFaceDetected] = useState(false);
 
   const startCamera = async () => {
@@ -44,7 +45,7 @@ const FaceEnrollment = () => {
     console.log('[FaceEnroll] Loading AI models...');
     const loaded = await loadModels();
     if (!loaded) {
-      setError('Failed to load Face AI models. Check that model files exist in public/models/.');
+      setError(`Failed to load Face AI models. Attempted URL: ${import.meta.env.BASE_URL}models/. Check that model files exist in public/models/.`);
       setLoading(false);
       return;
     }
@@ -57,6 +58,8 @@ const FaceEnrollment = () => {
       return;
     }
 
+    // Set cameraReady AFTER camera stream is active — this triggers the detection loop
+    setCameraReady(true);
     console.log('[FaceEnroll] ✅ Ready');
     setLoading(false);
   };
@@ -72,21 +75,51 @@ const FaceEnrollment = () => {
   }, []);
 
   // Continuous face detection to enable/disable capture button
+  // Uses cameraReady (state) instead of streamRef (ref) as dependency
+  // so the effect re-runs when camera becomes available
   useEffect(() => {
-    if (!modelsReady || !streamRef.current) return;
-    let active = true;
-    const checkFace = async () => {
-      while (active && videoRef.current && streamRef.current?.active) {
+    if (!modelsReady || !cameraReady || !streamRef.current) return;
+
+    // Wait for video to actually have valid dimensions before starting detection
+    const waitForVideo = () => {
+      return new Promise((resolve) => {
+        const check = () => {
+          if (videoRef.current && videoRef.current.readyState >= 2 && videoRef.current.videoWidth > 0) {
+            resolve();
+          } else {
+            setTimeout(check, 200);
+          }
+        };
+        check();
+      });
+    };
+
+    let intervalId = null;
+    let cancelled = false;
+
+    (async () => {
+      await waitForVideo();
+      if (cancelled) return;
+
+      console.log('[FaceEnroll] Video ready, starting face detection loop',
+        videoRef.current.videoWidth, 'x', videoRef.current.videoHeight);
+
+      intervalId = setInterval(async () => {
+        if (!videoRef.current || !streamRef.current?.active || cancelled) return;
         try {
           const embedding = await getFaceEmbedding(videoRef.current);
-          if (active) setFaceDetected(!!embedding);
-        } catch (e) { /* ignore */ }
-        await new Promise(r => setTimeout(r, 1500));
-      }
+          if (!cancelled) setFaceDetected(!!embedding);
+        } catch (e) {
+          console.warn('[FaceEnroll] Detection error:', e);
+        }
+      }, 800); // Check every 800ms for reliable detection
+    })();
+
+    return () => {
+      cancelled = true;
+      if (intervalId) clearInterval(intervalId);
     };
-    checkFace();
-    return () => { active = false; };
-  }, [modelsReady]);
+  }, [modelsReady, cameraReady]);
 
   const captureCanvasImage = () => {
     if (!videoRef.current) return null;
@@ -95,40 +128,51 @@ const FaceEnrollment = () => {
     canvas.height = videoRef.current.videoHeight || 480;
     const ctx = canvas.getContext('2d');
     ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL('image/jpeg', 0.7); // compressed JPEG
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.7); // compressed JPEG
+    console.log('[FaceEnroll] Canvas image captured, length:', dataUrl.length);
+    return dataUrl;
   };
 
   const handleCapture = async () => {
+    console.log('[FaceEnroll] Capture clicked');
     setCapturing(true);
     setError('');
 
     try {
       // 1. Get face embedding for identity verification during exams
+      console.log('[FaceEnroll] Step 1: Getting face embedding...');
       const embedding = await getFaceEmbedding(videoRef.current);
       if (!embedding) {
         throw new Error('No face detected. Please face the camera clearly and try again.');
       }
+      console.log('[FaceEnroll] ✅ Embedding captured, length:', embedding.length);
 
       // 2. Capture face image from canvas
+      console.log('[FaceEnroll] Step 2: Capturing canvas image...');
       const imageDataUrl = captureCanvasImage();
       if (!imageDataUrl) {
         throw new Error('Failed to capture image from camera.');
       }
 
-      // 3. Upload to Firebase Storage
-      console.log('[FaceEnroll] Uploading face image...');
-      const storageRef = ref(storage, `faces/${currentUser.uid}.jpg`);
-      await uploadString(storageRef, imageDataUrl, 'data_url');
-      const faceImageUrl = await getDownloadURL(storageRef);
-      console.log('[FaceEnroll] ✅ Image uploaded:', faceImageUrl);
+      // 3. Upload to Cloudinary (unsigned upload — no API secret needed)
+      console.log('[FaceEnroll] Step 3: Uploading to Cloudinary...');
+      const cloudinaryResult = await uploadToCloudinary(
+        imageDataUrl,
+        `examguard_face_${currentUser.uid}_${Date.now()}`
+      );
+      const faceImageUrl = cloudinaryResult.secure_url;
+      console.log('[FaceEnroll] ✅ Cloudinary URL:', faceImageUrl);
 
       // 4. Update Firestore user document
-      await updateDoc(doc(db, 'users', currentUser.uid), {
+      console.log('[FaceEnroll] Step 4: Saving to Firestore...');
+      const { setDoc } = await import('firebase/firestore');
+      await setDoc(doc(db, 'users', currentUser.uid), {
         faceEnrolled: true,
-        faceImageUrl: faceImageUrl,
+        faceImage: faceImageUrl,         // Cloudinary secure_url
+        faceImageUrl: faceImageUrl,      // Keep backward compat
         faceEmbedding: embedding,
         faceEnrolledAt: Date.now()
-      });
+      }, { merge: true });
       console.log('[FaceEnroll] ✅ Firestore updated');
 
       // 5. Update local auth state
@@ -144,11 +188,12 @@ const FaceEnrollment = () => {
         navigate('/student', { replace: true });
       }, 2500);
     } catch (err) {
-      console.error('[FaceEnroll] Error:', err);
+      console.error('[FaceEnroll] ❌ Error:', err);
       setError(err.message || 'Failed to capture face data.');
+    } finally {
+      // ALWAYS reset capturing state — prevents stuck loading
+      setCapturing(false);
     }
-
-    setCapturing(false);
   };
 
   return (
@@ -247,7 +292,7 @@ const FaceEnrollment = () => {
                 {capturing ? (
                   <div className="flex items-center">
                     <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                    Capturing & Uploading...
+                    Uploading to Cloud...
                   </div>
                 ) : (
                   <>
